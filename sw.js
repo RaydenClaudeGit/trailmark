@@ -1,7 +1,7 @@
 /* Caches the app itself so it opens with no signal.
    Map tiles are handled separately in IndexedDB by app.js. */
 
-const CACHE = 'trailmark-shell-v1';
+const CACHE = 'trailmark-shell-v2';
 const SHELL = ['./', './index.html', './app.js', './manifest.json'];
 
 self.addEventListener('install', e => {

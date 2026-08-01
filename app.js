@@ -1040,27 +1040,58 @@ function closeSheet(id) { document.getElementById(id).classList.remove('open'); 
 
 async function refreshRouteList() {
   const routes = await idbGetAll('routes');
-  routes.sort((a, b) => b.created - a.created);
   const list = document.getElementById('routeList');
   if (!routes.length) {
     list.innerHTML = '<p class="empty">No routes yet. Import a GPX file to get started — you can export one from OS Maps, Komoot, AllTrails or Strava.</p>';
     return;
   }
+
+  // Group by folder, case-insensitively (grouping key), keeping the first
+  // casing seen as the display label — so "East Sussex" and "east sussex"
+  // land in one group even if that mismatch reached storage some other way
+  // than the prompt() below, which already normalizes on write.
+  // '' = unfiled. Only show headings at all once at least one route has been
+  // filed — keeps the list looking exactly as before for anyone who hasn't
+  // used folders yet.
+  const groups = new Map();
+  for (const r of routes) {
+    const raw = r.folder || '';
+    const key = raw.toLowerCase();
+    if (!groups.has(key)) groups.set(key, { label: raw, routes: [] });
+    groups.get(key).routes.push(r);
+  }
+  for (const g of groups.values()) g.routes.sort((a, b) => b.created - a.created);
+
+  const folderKeys = Array.from(groups.keys()).filter(k => k)
+    .sort((a, b) => groups.get(a).label.localeCompare(groups.get(b).label));
+  const showHeadings = folderKeys.length > 0;
+  const orderedKeys = showHeadings ? [...folderKeys, ...(groups.has('') ? [''] : [])] : [''];
+
   list.innerHTML = '';
-  routes.forEach(r => {
-    const div = document.createElement('div');
-    div.className = 'route-item' + (state.route && state.route.id === r.id ? ' active' : '');
-    div.innerHTML = `
-      <div class="route-main">
-        <div class="route-name"></div>
-        <div class="route-meta">${(r.length / 1000).toFixed(1)} km · ${r.ascent} m ascent · ${r.tilesCached ? r.tilesCached + ' tiles offline' : 'not downloaded'}</div>
-      </div>
-      <button class="mini" data-load="${r.id}">Load</button>
-      <button class="mini danger" data-del="${r.id}">✕</button>
-    `;
-    div.querySelector('.route-name').textContent = r.name;
-    list.appendChild(div);
-  });
+  for (const key of orderedKeys) {
+    if (showHeadings) {
+      const h = document.createElement('div');
+      h.className = 'route-folder-heading';
+      h.textContent = groups.get(key).label || 'Unfiled';
+      list.appendChild(h);
+    }
+    for (const r of (groups.get(key) || { routes: [] }).routes) {
+      const div = document.createElement('div');
+      div.className = 'route-item' + (state.route && state.route.id === r.id ? ' active' : '');
+      div.innerHTML = `
+        <div class="route-main">
+          <div class="route-name" data-rename="${r.id}"></div>
+          <div class="route-meta">${(r.length / 1000).toFixed(1)} km · ${r.ascent} m ascent · ${r.tilesCached ? r.tilesCached + ' tiles offline' : 'not downloaded'}</div>
+          <div class="route-folder-tag" data-setfolder="${r.id}"></div>
+        </div>
+        <button class="mini" data-load="${r.id}">Load</button>
+        <button class="mini danger" data-del="${r.id}">✕</button>
+      `;
+      div.querySelector('.route-name').textContent = r.name;
+      div.querySelector('.route-folder-tag').textContent = r.folder ? ('📁 ' + r.folder) : '+ add to folder';
+      list.appendChild(div);
+    }
+  }
 
   list.querySelectorAll('[data-load]').forEach(b => {
     b.addEventListener('click', async () => {
@@ -1076,6 +1107,42 @@ async function refreshRouteList() {
       refreshRouteList();
     });
   });
+  list.querySelectorAll('[data-rename]').forEach(el => {
+    el.addEventListener('click', async () => {
+      const id = el.dataset.rename;
+      const r = await idbGet('routes', id);
+      if (!r) return;
+      const name = prompt('Rename route', r.name);
+      if (name === null) return;
+      const trimmed = name.trim();
+      if (!trimmed || trimmed === r.name) return;
+      r.name = trimmed;
+      await idbPut('routes', r);
+      if (state.route && state.route.id === id) {
+        state.route.name = r.name;
+        document.getElementById('routeTitle').textContent = r.name;
+      }
+      refreshRouteList();
+    });
+  });
+  list.querySelectorAll('[data-setfolder]').forEach(el => {
+    el.addEventListener('click', async () => {
+      const id = el.dataset.setfolder;
+      const r = await idbGet('routes', id);
+      if (!r) return;
+      // Match case-insensitively against folders already in use so "east
+      // sussex" doesn't silently create a second group next to "East Sussex".
+      const existing = Array.from(new Set(routes.map(x => x.folder).filter(Boolean)));
+      const typed = prompt('Folder (leave blank for none)', r.folder || '');
+      if (typed === null) return;
+      const trimmed = typed.trim();
+      const match = existing.find(f => f.toLowerCase() === trimmed.toLowerCase());
+      r.folder = trimmed ? (match || trimmed) : '';
+      await idbPut('routes', r);
+      if (state.route && state.route.id === id) state.route.folder = r.folder;
+      refreshRouteList();
+    });
+  });
 }
 
 function loadRoute(r) {
@@ -1085,6 +1152,7 @@ function loadRoute(r) {
   state.route.id = r.id;
   state.route.tilesCached = r.tilesCached || 0;
   state.route.created = r.created;
+  state.route.folder = r.folder || '';
   state.progress = 0;
   refreshMilestones();
   document.getElementById('routeTitle').textContent = r.name;
@@ -1108,7 +1176,8 @@ async function saveRoute(route) {
     hasEle: route.hasEle,
     bounds: route.bounds,
     created: route.created,
-    tilesCached: route.tilesCached || 0
+    tilesCached: route.tilesCached || 0,
+    folder: route.folder || ''
   };
   await idbPut('routes', plain);
 }
